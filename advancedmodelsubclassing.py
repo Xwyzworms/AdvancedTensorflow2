@@ -10,6 +10,7 @@ Original file is located at
 from tensorflow.keras.models import Model
 import tensorflow as tf
 from tensorflow.keras.layers import Dense,Dropout,Layer
+from tensorflow.keras.utils import to_categorical
 
 class MyModel(Model):
   def __init__(self, num_classes, **kwargs):
@@ -176,3 +177,146 @@ x_linear_reg =np.linspace(min(x_train),max(x_train),100)
 plt.plot(x_linear_reg,linReg.weight * x_linear_reg + linReg.bias,'r.')
 
 #Lets Try IT
+
+class TryCustomDense(Layer):
+
+  def __init__(self,units):
+    super(TryCustomDense,self).__init__()
+    self.units = units
+
+  def build(self, input_shape):
+    self.w = self.add_weight(shape=(input_shape[-1],self.units),
+                             initializer=tf.random_normal_initializer,
+                             name="kernel")
+    self.b = self.add_weight(shape=(self.units),initializer='zeros',
+                              name="bias")
+    
+  def call(self,inputs):
+    return tf.matmul(inputs, self.w) + self.b
+
+
+class CustomDropout(Layer):
+  def __init__(self, rate):
+    super(CustomDropout,self).__init__()
+    self.rate = rate
+
+  def call(self,inputs):
+    return tf.nn.dropout(inputs,rate=self.rate)
+  
+
+class SubclassModel(Model):
+  def __init__(self,units_1,units_2,units_3):
+    super(SubclassModel,self).__init__()
+    self.layer_1 = TryCustomDense(units_1)
+    self.dropout = CustomDropout(0.5)
+    self.layer_2 = TryCustomDense(units_2)
+    self.layer_3 = TryCustomDense(units_3)
+    self.softmax = tf.keras.layers.Softmax()
+
+  def call(self,inputs):
+    x = self.layer_1(inputs)
+    x = tf.nn.relu(x)
+    x = self.dropout(x)
+    x = self.layer_2(x)
+    x = tf.nn.relu(x)
+    x = self.dropout(x)
+    x = self.layer_3(x)
+
+    return self.softmax(x)
+
+model = SubclassModel(64,64,46)
+print(model(tf.ones((1,10000))))
+model.summary()
+
+from tensorflow.keras.datasets import reuters
+
+(train_data,train_labels),(test_data,test_labels) = reuters.load_data(num_words=10000)
+
+class_names = ['cocoa','grain','veg-oil','earn','acq','wheat','copper','housing','money-supply',
+   'coffee','sugar','trade','reserves','ship','cotton','carcass','crude','nat-gas',
+   'cpi','money-fx','interest','gnp','meal-feed','alum','oilseed','gold','tin',
+   'strategic-metal','livestock','retail','ipi','iron-steel','rubber','heat','jobs',
+   'lei','bop','zinc','orange','pet-chem','dlr','gas','silver','wpi','hog','lead']
+
+print(f"label {class_names[train_labels[0]]}")
+
+print(train_data[0])
+print(train_labels[0])
+
+word_to_indx = reuters.get_word_index()
+print(word_to_indx)
+
+inverted_word_index = dict([(value,key) for key,value in word_to_indx.items()])
+text_news = " ".join(inverted_word_index.get(i ,"?") for i in train_data[0])
+text_news
+
+def bag_of_words(text_samples, max_elements=10000):
+  output = np.zeros(shape=(len(text_samples),max_elements))
+  for i,word in enumerate(text_samples):
+    output[i,word] = 1
+  return output
+
+
+x_train = bag_of_words(train_data)
+x_test = bag_of_words(test_data)
+print(type(x_train))
+print("Shape of x_train:" ,x_train.shape)
+print("Shape Of x_test:" ,x_test.shape)
+
+print(x_train[0,0:100])
+
+print(train_labels[0])
+
+# to_categorical(train_lables,num_classes=len(class_names))
+
+
+
+loss_obj = tf.keras.losses.SparseCategoricalCrossentropy()
+optimizer = tf.keras.optimizers.Adam(learning_rate = 0.001)
+train_dataset = tf.data.Dataset.from_tensor_slices((x_train,train_labels))
+train_dataset = train_dataset.batch(32)
+
+
+
+def loss(model,x,y,wd):
+  kernel_variables = []
+  for l in model.layers:
+    for w in l.weights:
+      if 'kernel' in w.name:
+        kernel_variables.append(w)
+  wd_penalty = wd *tf.reduce_sum([tf.reduce_sum(tf.square(k)) for k in kernel_variables])
+  wd_penalty = tf.cast(wd_penalty,tf.float32)
+  yPred = model(x)
+  return loss_obj(y_true=y,y_pred=yPred) +wd_penalty
+
+def gradient(model,inputs,targets,wd):
+  with tf.GradientTape() as tape:
+    loss_val = loss(model,inputs,targets,wd)
+      
+  return loss_val, tape.gradient(loss_val,model.trainable_variables)
+
+def train():
+  train_loss_result = []
+  train_accuracy = []
+
+  num_epochs = 10
+  weight_decay = 0.001
+  for epoch in range(num_epochs):
+
+    epoch_loss_avg = tf.keras.metrics.Mean()
+    epoch_accuracy = tf.keras.metrics.CategoricalAccuracy()
+
+    for x,y in train_dataset:
+      loss_value, grads = gradient(model, x,y,weight_decay)
+      optimizer.apply_gradients(zip(grads,model.trainable_variables))
+      
+      epoch_loss_avg(loss_value)
+      epoch_accuracy(to_categorical(y),model(x))
+
+    train_loss_result.append(epoch_loss_avg.result())
+    train_accuracy.append(epoch_accuracy.result())
+
+    print(f"Epoch : {epoch}, Loss : {epoch_loss_avg.result()} acc : {epoch_accuracy.result()} ")
+
+train()
+
